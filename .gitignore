@@ -1,0 +1,10 @@
+# cache
+__pycache__/
+
+# results
+borrow_inpaint/
+fgsr_inpaint/
+fgsr_me/
+fuse_me/
+gffe_me/
+tmp/

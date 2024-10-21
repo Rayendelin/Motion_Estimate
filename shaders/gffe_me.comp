@@ -1,0 +1,61 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D world_pos;
+layout(binding = 1) uniform sampler2D world_pos_1;
+layout(binding = 2) uniform sampler2D mv;
+layout(binding = 3) uniform sampler2D color;
+layout(binding = 4) uniform sampler2D depth;
+layout(binding = 5) uniform sampler2D stencil;
+
+uniform mat4 vp_matrix;
+uniform mat4 vp_matrix_next;
+
+layout(rgba32f, binding = 0) writeonly uniform image2D warp_color;
+layout(rgba32f, binding = 1) writeonly uniform image2D warp_mv;
+layout(r32ui, binding = 2) uniform uimage2D warp_depth;
+
+void main() {
+	ivec2 pixCoord = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 frameSize = textureSize(color, 0);
+	if (pixCoord.x >= frameSize.x || pixCoord.y >= frameSize.y) {
+		return;
+	}
+	vec2 size = vec2(frameSize);
+
+	// predict world position in next frame
+	vec3 world_pos_cur = texelFetch(world_pos, pixCoord, 0).xyz;
+	vec3 world_pos_next = world_pos_cur;
+	float dynamic = texelFetch(stencil, pixCoord, 0).x;
+	if (dynamic > 0.5) {
+		vec2 pix_mv = texelFetch(mv, pixCoord, 0).xy;
+		pix_mv.y = -pix_mv.y;
+		vec2 back_proj = vec2(pixCoord) - pix_mv;
+		vec3 world_pos_prev = texelFetch(world_pos_1, ivec2(round(back_proj)), 0).xyz;
+		world_pos_next = world_pos_cur + 0.5 * (world_pos_cur - world_pos_prev);
+	}
+
+	// motion estimation
+	vec4 ndc_next = transpose(vp_matrix_next) * vec4(world_pos_next, 1.0);
+	ndc_next.xyz = ndc_next.xyz / ndc_next.w;
+	vec4 ndc_cur = transpose(vp_matrix) * vec4(world_pos_cur, 1.0);
+	ndc_cur.xyz = ndc_cur.xyz / ndc_cur.w;
+	vec2 flow_save = (ndc_next.xy - ndc_cur.xy) * vec2(frameSize) / 2;
+	ivec2 flow = ivec2(round(flow_save));
+	ivec2 forw_pos = ivec2(pixCoord.x + flow.x, pixCoord.y - flow.y);
+
+	// depth test
+	float pix_depth = texelFetch(depth, pixCoord, 0).x;
+	uint pix_depth_int = int(2147483647 - pix_depth * 65535);
+	uint pix_depth_int_prev = imageAtomicMax(warp_depth, forw_pos, pix_depth_int);
+	memoryBarrier();
+
+	uint pix_depth_int_cur = imageLoad(warp_depth, forw_pos).x;
+	if (pix_depth_int == pix_depth_int_cur) {
+		// forward warp
+		vec3 pix_color = texelFetch(color, pixCoord, 0).xyz;
+		imageStore(warp_color, forw_pos, vec4(pix_color, 1.0));
+		imageStore(warp_mv, forw_pos, vec4(flow_save.x, flow_save.y, 0.0, 1.0));
+	}
+}

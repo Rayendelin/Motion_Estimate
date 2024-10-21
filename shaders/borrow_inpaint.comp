@@ -1,0 +1,73 @@
+# version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D mv;
+
+layout(rgba32f, binding = 0) writeonly uniform image2D inpaint_mv;
+
+const ivec2 offsets[] = {
+    ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1),
+    ivec2(-1, 0), ivec2(1, 0),
+    ivec2(-1, 1), ivec2(0, 1), ivec2(1, 1)
+};
+
+float min_distance = 100000.0;
+
+bool similarity[8];
+
+vec2 mv_value;
+
+void main() {
+    ivec2 pixCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 frameSize = textureSize(mv, 0);
+    if (pixCoord.x >= frameSize.x || pixCoord.y >= frameSize.y) {
+		return;
+	}
+
+    float center = texelFetch(mv, pixCoord, 0).w;
+    if (center == 0.0) {
+        // thin detect from FSR
+        for (int i = 0; i < 8; i++) {
+            ivec2 offset = offsets[i] + pixCoord;
+            if (offset.x >= frameSize.x || offset.y >= frameSize.y || offset.x < 0 || offset.y < 0) {
+                similarity[i] = false;
+                continue;
+            }
+            
+            float mv_valid = texelFetch(mv, offset, 0).w;
+            if (mv_valid == 0.0) {
+                similarity[i] = true;
+                continue;
+            }
+            
+            similarity[i] = false;
+            vec2 mv_val = texelFetch(mv, offset, 0).xy;
+
+            // caculate distance
+            vec2 back_proj = vec2(offset.x - mv_val.x, offset.y + mv_val.y);
+            vec2 back_proj_pix = round(back_proj);
+            vec2 pix_offset = back_proj_pix - back_proj + offsets[i];
+            if (length(pix_offset) < min_distance) {
+                min_distance = length(pix_offset);
+                mv_value = mv_val;
+            }
+        }
+
+        bool left_up = similarity[0] && similarity[1] && similarity[3];
+        bool right_up = similarity[1] && similarity[2] && similarity[4];
+        bool left_down = similarity[3] && similarity[5] && similarity[6];
+        bool right_down = similarity[4] && similarity[6] && similarity[7];
+
+        if (!(left_up || right_up || left_down || right_down)) {
+            if (min_distance < 100000.0) {
+                imageStore(inpaint_mv, pixCoord, vec4(mv_value, 0.0, 1.0));
+            }
+        }
+
+        return;
+    }
+
+    imageStore(inpaint_mv, pixCoord, vec4(texelFetch(mv, pixCoord, 0).xy, 0.0, 1.0));
+}
+
